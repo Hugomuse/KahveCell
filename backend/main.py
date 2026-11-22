@@ -89,6 +89,15 @@ class Order(Base):
     is_guest: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+class Favorite(Base):
+    __tablename__ = 'favorites'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=ident)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    shop_id: Mapped[str] = mapped_column(ForeignKey('shops.id'))
+    product_id: Mapped[str] = mapped_column(ForeignKey('products.id'))
+    customizations: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class Payment(Base):
     __tablename__='payments'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=ident)
@@ -176,6 +185,9 @@ class OrderIn(BaseModel):
     sugar:str='Yok'
     extra_shot:bool=False
     is_guest:bool=False
+class FavoriteIn(BaseModel):
+    order_id: str
+
 class StatusIn(BaseModel): status:str
 class QRIn(BaseModel): payload:dict
 
@@ -276,28 +288,15 @@ def distance_km(a,b,c,d):
     return 6371*2*math.asin(min(1,math.sqrt(h)))
 
 @app.get('/api/v1/shops')
-def shops(
-    lat: Optional[float] = None,
-    lng: Optional[float] = None,
-    radius: float = Query(default=100, ge=0.1, le=500),
-    q: str = '',
-    min_rating: float = 0,
-    session: Session = Depends(db)
-):
-    out = []
-
+def shops(lat: Optional[float] = None, lng: Optional[float] = None, radius: float = Query(default=100, ge=0.1, le=500), q: str = '', min_rating: float = 0, session: Session = Depends(db)):
+    out=[]
     for s in session.scalars(select(Shop)):
-        if q.lower() not in (s.name + ' ' + s.address).lower() or s.rating < min_rating:
-            continue
+        if q.lower() not in (s.name+' '+s.address).lower() or s.rating<min_rating:continue
+        d=distance_km(lat,lng,s.lat,s.lng) if lat is not None and lng is not None else None
+        if d is not None and d>radius:continue
+        out.append(shop_dict(s,d))
+    return sorted(out,key=lambda item:item.get('distance_km',0))
 
-        d = distance_km(lat, lng, s.lat, s.lng) if lat is not None and lng is not None else None
-
-        if d is not None and d > radius:
-            continue
-
-        out.append(shop_dict(s, d))
-
-    return sorted(out, key=lambda item: item.get('distance_km') or 0)
 @app.get('/api/v1/shops/{shop_id}')
 def shop_detail(shop_id:str,session:Session=Depends(db)):
     s=session.get(Shop,shop_id)
@@ -331,6 +330,44 @@ def create_order(data:OrderIn,u=Depends(current),session:Session=Depends(db)):
 @app.get('/api/v1/orders/history')
 def history(u=Depends(current),session:Session=Depends(db)):
     return [order_dict(o,session,False) for o in session.scalars(select(Order).where(Order.user_id==u.id).order_by(Order.created_at.desc()))]
+
+def favorite_dict(f, session):
+    shop = session.get(Shop, f.shop_id)
+    product = session.get(Product, f.product_id)
+    return {
+        'id': f.id, 'shop_id': f.shop_id, 'product_id': f.product_id,
+        'shop_name': shop.name if shop else '',
+        'product_name': product.name if product else '',
+        'customizations': f.customizations, 'created_at': f.created_at.isoformat()
+    }
+
+@app.get('/api/v1/favorites')
+def list_favorites(u=Depends(current), session: Session=Depends(db)):
+    favorites = session.scalars(select(Favorite).where(Favorite.user_id == u.id).order_by(Favorite.created_at.desc())).all()
+    return [favorite_dict(f, session) for f in favorites]
+
+@app.post('/api/v1/favorites', status_code=201)
+def save_favorite(data: FavoriteIn, u=Depends(current), session: Session=Depends(db)):
+    order = session.get(Order, data.order_id)
+    if not order: fail(404, 'Sipariş bulunamadı')
+    if order.user_id != u.id: fail(403, 'Başkasının siparişini favorileyemezsiniz')
+    # A previous order uniquely identifies the coffee and its exact preferences.
+    existing = session.scalars(select(Favorite).where(Favorite.user_id == u.id)).all()
+    for f in existing:
+        if f.shop_id == order.shop_id and f.product_id == order.product_id and f.customizations == order.customizations:
+            return favorite_dict(f, session)
+    fav = Favorite(user_id=u.id, shop_id=order.shop_id, product_id=order.product_id,
+                   customizations=dict(order.customizations or {}))
+    session.add(fav); session.commit(); session.refresh(fav)
+    return favorite_dict(fav, session)
+
+@app.delete('/api/v1/favorites/{favorite_id}')
+def delete_favorite(favorite_id: str, u=Depends(current), session: Session=Depends(db)):
+    f = session.get(Favorite, favorite_id)
+    if not f: fail(404, 'Favori bulunamadı')
+    if f.user_id != u.id: fail(403, 'Bu favoriyi silemezsiniz')
+    session.delete(f); session.commit()
+    return {'success': True}
 
 @app.get('/api/v1/orders/owner/pending')
 def owner_orders(u=Depends(owner),session:Session=Depends(db)):
