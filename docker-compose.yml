@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kahvecell
+      POSTGRES_USER: kahvecell
+      POSTGRES_PASSWORD: kahvecell
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kahvecell"]
+      interval: 4s
+      retries: 12
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://kahvecell:kahvecell@db:5432/kahvecell
+      SECRET_KEY: ${SECRET_KEY:-demo-secret-change-before-deploy}
+      CORS_ORIGINS: http://localhost:5173
+    depends_on:
+      db:
+        condition: service_healthy
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [backend]
+volumes:
+  pgdata:
